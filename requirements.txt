@@ -1,0 +1,5 @@
+flask==3.1.0
+flask-cors==5.0.1
+openai==1.82.0
+yt-dlp
+gunicorn==23.0.0
