@@ -13,4 +13,4 @@ WORKDIR /app
 ENV PORT=8080
 EXPOSE 8080
 
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--timeout", "300", "--workers", "2", "server:app"]
+CMD pip install --upgrade yt-dlp && gunicorn --bind 0.0.0.0:8080 --timeout 300 --workers 2 server:app
