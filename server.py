@@ -5,13 +5,33 @@ import tempfile
 import glob
 
 from flask import Flask, request, jsonify, send_file
-from flask_cors import CORS
 from openai import OpenAI
 
 app = Flask(__name__)
-CORS(app, expose_headers=["X-Filename", "Content-Type", "Content-Disposition"])
 
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+
+# ── CORS — handle all preflight and response headers manually ──
+
+@app.after_request
+def add_cors(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    response.headers["Access-Control-Expose-Headers"] = "X-Filename, Content-Disposition"
+    return response
+
+
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        response = app.make_default_options_response()
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        response.headers["Access-Control-Expose-Headers"] = "X-Filename, Content-Disposition"
+        return response
 
 
 @app.route("/health", methods=["GET"])
@@ -21,7 +41,7 @@ def health():
 
 # ── AD TRANSCRIBER ───────────────────────────────────────
 
-@app.route("/transcribe", methods=["POST"])
+@app.route("/transcribe", methods=["POST", "OPTIONS"])
 def transcribe():
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -114,7 +134,7 @@ def transcribe():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/translate", methods=["POST"])
+@app.route("/translate", methods=["POST", "OPTIONS"])
 def translate():
     try:
         data = request.json
@@ -147,7 +167,7 @@ def translate():
 
 # ── MEDIA DOWNLOADER (Instagram, Facebook, etc.) ─────────
 
-@app.route("/download-media", methods=["POST"])
+@app.route("/download-media", methods=["POST", "OPTIONS"])
 def download_media():
     try:
         data = request.json
@@ -187,7 +207,6 @@ def download_media():
             filepath = os.path.join(tmpdir, files[0])
             filename = files[0]
 
-            # Clean up filename
             filename = "".join(c for c in filename if c.isalnum() or c in "._- ").strip()
             if not filename:
                 filename = "download.mp4"
@@ -205,7 +224,6 @@ def download_media():
             }
             mime = mime_types.get(ext, "application/octet-stream")
 
-            # Read file into memory so tempdir can be cleaned up
             with open(filepath, "rb") as f:
                 file_data = io.BytesIO(f.read())
 
