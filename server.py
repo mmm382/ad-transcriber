@@ -1,14 +1,15 @@
 import os
+import io
 import subprocess
 import tempfile
 import glob
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from openai import OpenAI
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, expose_headers=["X-Filename", "Content-Type", "Content-Disposition"])
 
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
@@ -18,13 +19,14 @@ def health():
     return jsonify({"status": "ok"})
 
 
+# ── AD TRANSCRIBER ───────────────────────────────────────
+
 @app.route("/transcribe", methods=["POST"])
 def transcribe():
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             audio_path = os.path.join(tmpdir, "audio.mp3")
 
-            # ── handle URL or file upload ────────────────
             if request.is_json:
                 url = (request.json.get("url") or "").strip()
                 if not url:
@@ -47,13 +49,13 @@ def transcribe():
 
                 if result.returncode != 0:
                     return jsonify({
-                        "error": "Could not download video from this URL. Make sure the ad has a video and the link is correct.",
+                        "error": "Could not download video. Make sure the ad has a video and the link is correct.",
                         "details": result.stderr[-500:] if result.stderr else "",
                     }), 400
 
                 files = glob.glob(os.path.join(tmpdir, "video.*"))
                 if not files:
-                    return jsonify({"error": "No video file found — this ad might be image-only."}), 400
+                    return jsonify({"error": "No video found — this ad might be image-only."}), 400
                 video_path = files[0]
 
             elif "file" in request.files:
@@ -64,7 +66,6 @@ def transcribe():
             else:
                 return jsonify({"error": "Send a JSON body with 'url' or upload a 'file'."}), 400
 
-            # ── extract audio ────────────────────────────
             result = subprocess.run(
                 [
                     "ffmpeg", "-i", video_path,
@@ -77,13 +78,12 @@ def transcribe():
             )
 
             if result.returncode != 0 or not os.path.exists(audio_path):
-                return jsonify({"error": "Failed to extract audio. The file might not contain audio."}), 500
+                return jsonify({"error": "Failed to extract audio."}), 500
 
             size_mb = os.path.getsize(audio_path) / (1024 * 1024)
             if size_mb > 25:
-                return jsonify({"error": f"Audio is {size_mb:.1f}MB — Whisper limit is 25MB. Try a shorter video."}), 400
+                return jsonify({"error": f"Audio is {size_mb:.1f}MB — Whisper limit is 25MB."}), 400
 
-            # ── transcribe original language ─────────────
             with open(audio_path, "rb") as af:
                 transcript = client.audio.transcriptions.create(
                     model="whisper-1",
@@ -91,7 +91,6 @@ def transcribe():
                     response_format="verbose_json",
                 )
 
-            # ── translate to English ─────────────────────
             english_text = None
             detected_lang = getattr(transcript, "language", "unknown")
 
@@ -110,7 +109,7 @@ def transcribe():
             })
 
     except subprocess.TimeoutExpired:
-        return jsonify({"error": "Timed out — the video might be too long or the URL too slow."}), 504
+        return jsonify({"error": "Timed out — video might be too long."}), 504
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -142,6 +141,85 @@ def translate():
             "language": target_lang,
         })
 
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── MEDIA DOWNLOADER (Instagram, Facebook, etc.) ─────────
+
+@app.route("/download-media", methods=["POST"])
+def download_media():
+    try:
+        data = request.json
+        url = (data.get("url") or "").strip()
+        if not url:
+            return jsonify({"error": "No URL provided"}), 400
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = subprocess.run(
+                [
+                    "yt-dlp",
+                    "-o", os.path.join(tmpdir, "%(title).80s.%(ext)s"),
+                    "--no-playlist",
+                    "--max-filesize", "200M",
+                    "--no-warnings",
+                    url,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+
+            if result.returncode != 0:
+                return jsonify({
+                    "error": "Could not download from this URL. Make sure it's a public post.",
+                    "details": result.stderr[-500:] if result.stderr else "",
+                }), 400
+
+            files = [
+                f for f in os.listdir(tmpdir)
+                if os.path.isfile(os.path.join(tmpdir, f))
+            ]
+
+            if not files:
+                return jsonify({"error": "No media found at this URL."}), 400
+
+            filepath = os.path.join(tmpdir, files[0])
+            filename = files[0]
+
+            # Clean up filename
+            filename = "".join(c for c in filename if c.isalnum() or c in "._- ").strip()
+            if not filename:
+                filename = "download.mp4"
+
+            ext = os.path.splitext(filename)[1].lower()
+            mime_types = {
+                ".mp4": "video/mp4",
+                ".webm": "video/webm",
+                ".mkv": "video/x-matroska",
+                ".mov": "video/quicktime",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+                ".webp": "image/webp",
+            }
+            mime = mime_types.get(ext, "application/octet-stream")
+
+            # Read file into memory so tempdir can be cleaned up
+            with open(filepath, "rb") as f:
+                file_data = io.BytesIO(f.read())
+
+            response = send_file(
+                file_data,
+                mimetype=mime,
+                as_attachment=True,
+                download_name=filename,
+            )
+            response.headers["X-Filename"] = filename
+            return response
+
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Download timed out — try a shorter video."}), 504
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
